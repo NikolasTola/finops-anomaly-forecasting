@@ -203,7 +203,8 @@ finops-anomaly-forecasting/
 │   ├── 06_anomaly_detection_evaluation.ipynb
 │   ├── 07_stationarity_acf_pacf.ipynb
 │   ├── 08_sarima_modeling.ipynb
-│   └── 09_sarima_anomaly_detection.ipynb
+│   ├── 09_sarima_anomaly_detection.ipynb
+|   └── 10_generalization_test.ipynb
 ├── src/
 │   ├── data_loader.py
 │   ├── forecasting.py
