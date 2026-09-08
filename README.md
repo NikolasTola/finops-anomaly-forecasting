@@ -8,6 +8,7 @@
 - [Etapas realizadas](#etapas-realizadas)
 - [Metodologia](#metodologia)
 - [Resultados](#resultados)
+- [Teste de generalização](#teste-de-generalização)
 - [Dashboard](#dashboard)
 - [Estrutura do repositório](#estrutura-do-repositório)
 - [Como reproduzir](#como-reproduzir)
@@ -67,6 +68,7 @@ A tabela abaixo resume o que foi feito em cada notebook, na ordem em que o proje
 | `07_stationarity_acf_pacf.ipynb` | Teste de Dickey-Fuller Aumentado (ADF) e análise de ACF/PACF, em lags curtos e sazonais. | A série já é fortemente estacionária, sem necessidade de diferenciação. Os parâmetros do SARIMA foram definidos a partir dessa análise. |
 | `08_sarima_modeling.ipynb` | Tentativa de treinar SARIMA nativo (inviável por consumo de memória), solução com termos de Fourier, comparação de candidatos por AIC e cálculo de métricas de forecasting. | O modelo `ARIMA(1,0,0)` com termos de Fourier foi o melhor por AIC, mas os coeficientes de Fourier ficaram próximos de zero, indicando que o pico diário não foi bem representado como sinal determinístico. |
 | `09_sarima_anomaly_detection.ipynb` | Aplicação do mesmo pipeline de detecção de anomalias (desvio-padrão móvel, limiar, avaliação por janela) usando o resíduo do SARIMA, e comparação final com a decomposição simples. | O SARIMA não superou a decomposição simples para a tarefa de detecção de anomalias neste dataset. A decomposição simples foi mantida como modelo final do projeto. |
+| `10_generalization_test.ipynb` | Retreino do mesmo pipeline (do zero, sem reaproveitar o modelo original) em 7 outras séries de CPU utilization do NAB, com corte treino/teste ajustado por série para garantir que as janelas de anomalia caiam no teste. | O método generaliza de forma desigual: bem em séries com treino suficiente e anomalias de magnitude (F1 até 0.875), mas falha completamente (F1 = 0.0) em séries onde a anomalia não se manifesta como desvio de valor. |
 
 ## Metodologia
 
@@ -148,6 +150,28 @@ O MAPE elevado é esperado neste dataset: a série opera majoritariamente numa b
 
 Na prática, isso significa que o modelo gerou 3 alarmes ao longo do período de teste (~2.8 dias): 2 verdadeiros positivos (cobrindo a janela de anomalia de maior severidade) e 1 falso positivo (um dia em que o job de rotina disparou um pouco mais forte que o normal). Das duas janelas de anomalia reais, 1 foi detectada e 1 não foi, pelo motivo detalhado na seção de Limitações.
 
+## Teste de generalização
+
+O modelo final foi desenvolvido e calibrado sobre uma única série (`ec2_cpu_utilization_24ae8d.csv`). Para checar se a metodologia (não o modelo já treinado, mas a receita de decisões: decomposição sazonal, desvio-padrão móvel de 2h, limiar no percentil 99) generaliza, o mesmo pipeline foi retreinado do zero em 7 outras séries de CPU utilization do mesmo benchmark (NAB `realAWSCloudwatch`), cada uma de uma instância EC2 diferente.
+
+| Série | % de treino | Janelas no teste | Precisão | Recall | F1 |
+|---|---|---|---|---|---|
+| 24ae8d (original) | 78.3% | 2 | 0.500 | 0.500 | 0.500 |
+| 53ea38 | 30.0% | 2 | 0.000 | 0.000 | 0.000 |
+| 5f5533 | 30.0% | 1 | 0.333 | 1.000 | 0.500 |
+| 77c1ca | 36.6% | 1 | 0.333 | 1.000 | 0.500 |
+| 825cc2 | 30.7% | 1 | 0.500 | 1.000 | 0.667 |
+| ac20cd | 76.5% | 1 | 0.778 | 1.000 | 0.875 |
+| c6585a | 80.0% | 0 (série sem anomalia real) | — | — | — |
+| fe7f93 | 30.0% | 2 | 0.167 | 0.500 | 0.250 |
+
+**O resultado não é uniforme, e a causa foi investigada, não só constatada.** O F1 varia de 0.0 a 0.875. Duas explicações concorrentes foram identificadas:
+
+1. **Quantidade de dado de treino:** as duas séries com melhor resultado (78.3% e 76.5% de treino) tiveram F1 de 0.500 e 0.875. Isso acontece porque, nessas séries, a anomalia ocorre mais tarde na linha do tempo, sobrando mais histórico normal para calibrar o perfil sazonal e o limiar antes do evento.
+2. **Tipo de anomalia diferente entre séries:** investigando a série com pior resultado (`53ea38`, F1 = 0.0), foi encontrado que o valor real durante a janela de anomalia (mínimo 1.604, máximo 2.656) fica praticamente no mesmo intervalo do período normal (mínimo 1.632, máximo 2.650). Ou seja, essa anomalia não se manifesta como um desvio de magnitude, ao contrário da série original. Um detector baseado em resíduo e desvio-padrão, por construção, não tem sinal para capturar esse tipo de anomalia, independentemente da quantidade de dado disponível.
+
+**Conclusão:** a metodologia generaliza razoavelmente bem para anomalias do mesmo tipo (desvio de magnitude), especialmente com treino suficiente, mas não é uma solução geral para qualquer tipo de anomalia em séries de CPU utilization. Detectar anomalias de mudança de padrão ou variância exigiria uma estratégia de detecção complementar, fora do escopo deste projeto.
+
 ## Dashboard
 
 O projeto inclui um dashboard interativo em Streamlit (`app/streamlit_app.py`), organizado em 5 abas:
@@ -212,14 +236,14 @@ finops-anomaly-forecasting/
 
 **Sazonalidade com jitter de horário.** O principal padrão sazonal da série (o pico diário) não ocorre num horário fixo, variando em até 35 minutos entre execuções. Isso limita a eficácia de qualquer método baseado em posição fixa dentro do ciclo, seja decomposição sazonal clássica, seja regressão harmônica com poucos termos de Fourier. Ambos os métodos testados neste projeto convergiram para o mesmo problema: a amplitude real do pico é subestimada, porque a média entre ciclos espalha o pico entre posições próximas em vez de concentrá-lo numa só.
 
-**Escopo de validação limitado a uma única série.** Todo o desenvolvimento e validação foi feito sobre uma única série do NAB (`ec2_cpu_utilization_24ae8d.csv`). Não há garantia de que os mesmos parâmetros (janela de 2 horas, percentil 99) generalizem bem para outras séries com padrões de ruído ou sazonalidade diferentes, sem um novo processo de calibração.
+**Detecção limitada a anomalias de magnitude.** O teste de generalização (ver seção correspondente) mostrou que o método falha completamente em séries onde a anomalia não se manifesta como um desvio de valor em relação ao padrão normal (F1 = 0.0 na série `53ea38`, por exemplo). O detector construído neste projeto é específico para anomalias de magnitude/amplitude, não para mudanças de variância, tendência ou padrão.
 
 **Threshold estático.** O limiar de detecção foi calibrado uma única vez, a partir de um período fixo de treino. Em um cenário real de produção, o comportamento "normal" de um sistema tende a mudar ao longo do tempo (crescimento orgânico de uso, mudanças de infraestrutura), o que exigiria uma estratégia de recalibração periódica do limiar, não implementada aqui.
 
 ## Próximos passos
 
 - Testar uma estratégia de detecção que combine múltiplos sinais (por exemplo, desvio-padrão móvel e frequência de picos numa janela), em vez de depender de uma única métrica de variabilidade.
-- Avaliar o mesmo pipeline em outras séries do NAB (`realAWSCloudwatch` tem outras séries de CPU utilization), para checar se os parâmetros escolhidos generalizam ou precisam de ajuste por série.
+- Construir um detector complementar sensível a mudanças de variância ou padrão (por exemplo, testes de mudança de regime como CUSUM), para cobrir o tipo de anomalia que o detector atual, baseado em magnitude, não captura (identificado no teste de generalização).
 - Explorar uma estratégia de recalibração periódica do limiar, simulando um cenário de produção onde o comportamento normal do sistema muda ao longo do tempo.
 - Investigar se a inclusão de contexto adicional (por exemplo, logs de eventos de infraestrutura, se disponíveis) ajudaria a capturar anomalias de baixa amplitude, como a que passou despercebida neste projeto.
 - Considerar bibliotecas mais recentes de forecasting probabilístico (como Prophet ou modelos baseados em redes neurais para séries temporais) como alternativa ao SARIMA, especialmente para lidar melhor com sazonalidade de fase variável.
